@@ -19,7 +19,6 @@ from handlers import (
 
 dp = Dispatcher()
 
-# Регистрация обработчиков
 dp.message.register(command_start_handler, CommandStart())
 dp.message.register(help_handler, Command("help"))
 dp.chat_member.register(on_new_member)
