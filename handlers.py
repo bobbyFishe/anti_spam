@@ -7,8 +7,7 @@ from aiogram import Bot
 from aiogram.types import Message, ChatMemberUpdated, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.enums import ParseMode, ChatMemberStatus
 
-from config import MUTED_PERMISSIONS, FULL_PERMISSIONS, captcha_tasks, filter_list_name, ADMIN_ID, TIME_SECONDS_BAN, recent_messages, TIME_FOR_ANSWER
-from utils import echo_handler
+from config import *
 
 async def on_new_member(update: ChatMemberUpdated, bot: Bot):
     if update.new_chat_member.status != "member":
@@ -25,17 +24,51 @@ async def on_new_member(update: ChatMemberUpdated, bot: Bot):
     if user.id in captcha_tasks:
         del captcha_tasks[user.id]
 
-    a = random.randint(1, 10)
-    b = random.randint(1, 10)
-    c = random.randint(1, 10)
-    correct = a + b * c
+    # Выбираем случайный тип CAPTCHA
+    task_type = random.choice(CAPTCHA_TASKS)
+    task_data = task_type["generate"]()
+    correct_answer = str(task_type["solve"](task_data))
+    question_text = task_type["format"](task_data)
 
-    options = [correct]
+    # Генерируем варианты ответов
+    options = [correct_answer]
+    
+    if task_type["type"] in ["math", "word_count"]:
+        # Для числовых ответов генерируем близкие числа
+        correct_num = int(correct_answer) if correct_answer.isdigit() else 0
+        while len(options) < 6:
+            if correct_num > 0:
+                wrong = correct_num + random.randint(-5, 5)
+                if wrong <= 0 or str(wrong) in options:
+                    continue
+                options.append(str(wrong))
+            else:
+                wrong = random.randint(1, 20)
+                if str(wrong) in options:
+                    continue
+                options.append(str(wrong))
+    else:
+        # Для текстовых ответов генерируем случайные варианты
+        wrong_answers = []
+        if task_type["type"] == "logic":
+            wrong_answers = ["круг", "синий", "киев", "8", "четное"]
+        elif task_type["type"] == "simple":
+            wrong_answers = ["5", "12", "б", "4", "xx"]
+        elif task_type["type"] == "sequence":
+            wrong_answers = ["6", "9", "д", "25", "апрель"]
+        
+        while len(options) < 6 and wrong_answers:
+            wrong = random.choice(wrong_answers)
+            wrong_answers.remove(wrong)
+            if wrong != correct_answer and wrong not in options:
+                options.append(wrong)
+    
+    # Если не набрали достаточно вариантов, добавляем случайные числа
     while len(options) < 6:
-        wrong = correct + random.randint(-8, 8)
-        if wrong <= 0 or wrong in options:
-            continue
-        options.append(wrong)
+        wrong = str(random.randint(1, 30))
+        if wrong not in options:
+            options.append(wrong)
+    
     random.shuffle(options)
 
     # Создаём клавиатуру с кнопками
@@ -44,7 +77,7 @@ async def on_new_member(update: ChatMemberUpdated, bot: Bot):
     for opt in options:
         row.append(InlineKeyboardButton(
             text=str(opt),
-            callback_data=f"captcha:{opt}:{correct}:{user.id}:{chat_id}"
+            callback_data=f"captcha:{opt}:{correct_answer}:{user.id}:{chat_id}:{task_type['type']}"
         ))
         if len(row) == 2:
             keyboard.inline_keyboard.append(row)
@@ -63,7 +96,7 @@ async def on_new_member(update: ChatMemberUpdated, bot: Bot):
     sent_message = await bot.send_message(
         chat_id=chat_id,
         text=f"👋 Привет, {user.mention_html()}!\n\n"
-             f"Решите пример:\n<b>{a} + {b} × {c} = ?</b>\n\n"
+             f"<b>{question_text}</b>\n\n"
              f"⏳ У тебя <b>{TIME_FOR_ANSWER}</b> секунд...",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
@@ -72,12 +105,12 @@ async def on_new_member(update: ChatMemberUpdated, bot: Bot):
     # Сохраняем данные для таймера
     captcha_tasks[user.id] = {
         "chat_id": chat_id,
-        "correct": correct,
+        "correct": correct_answer,
         "message_id": sent_message.message_id,
         "user_mention": user.mention_html(),
-        "a": a, "b": b, "c": c,
+        "question": question_text,
+        "task_type": task_type["type"],
         "keyboard": keyboard,
-        "task": None  # Будет хранить задачу таймера
     }
     
     # Запускаем таймаут и секундный отсчёт
@@ -98,20 +131,13 @@ async def update_captcha_timer(user_id: int, chat_id: int, message_id: int, bot:
             should_update = False
             
             if remaining <= 4:
-                # Последние 4 секунды - каждую секунду
                 should_update = True
-            elif remaining <= 10:
-                # С 5 по 10 секунду - каждую 2 секунду
-                if remaining % 2 == 0:  # 10, 8, 6
-                    should_update = True
-            elif remaining <= 20:
-                # С 11 по 20 секунду - каждые 5 секунд
-                if remaining % 5 == 0:  # 20, 15, 10 (но 10 уже обработано выше)
-                    should_update = True
-            # else:
-            #     # Свыше 20 секунд - каждые 10 секунд
-            #     if remaining % 10 == 0:  # 30, 20 (но 20 уже обработано выше)
-            #         should_update = True
+            elif remaining <= 10 and remaining % 2 == 0:
+                should_update = True
+            elif remaining <= 20 and remaining % 5 == 0:
+                should_update = True
+            elif remaining % 10 == 0:
+                should_update = True
             
             if should_update:
                 task_data = captcha_tasks[user_id]
@@ -132,7 +158,7 @@ async def update_captcha_timer(user_id: int, chat_id: int, message_id: int, bot:
                         chat_id=chat_id,
                         message_id=message_id,
                         text=f"👋 Привет, {task_data['user_mention']}!\n\n"
-                             f"Решите пример:\n<b>{task_data['a']} + {task_data['b']} × {task_data['c']} = ?</b>\n\n"
+                             f"<b>{task_data['question']}</b>\n\n"
                              f"{icon} {bar}\n"
                              f"Осталось: <b>{remaining}</b> сек",
                         parse_mode=ParseMode.HTML,
@@ -176,10 +202,11 @@ async def captcha_callback(callback: CallbackQuery, bot: Bot):
         return
 
     data = callback.data.split(":")
-    answer = int(data[1])
-    correct = int(data[2])
+    answer = data[1]  # Ответ пользователя (строка!)
+    correct = data[2]  # Правильный ответ (строка!)
     user_id = int(data[3])
     chat_id = int(data[4])
+    task_type = data[5] if len(data) > 5 else "math"
 
     # Проверяем, что это тот же пользователь
     if callback.from_user.id != user_id:
@@ -190,7 +217,15 @@ async def captcha_callback(callback: CallbackQuery, bot: Bot):
         await callback.answer("CAPTCHA истекла или уже пройдена.", show_alert=True)
         return
 
-    if answer == correct:
+    # Сравниваем ответы (в нижнем регистре для текстовых)
+    if task_type in ["logic", "simple", "sequence"]:
+        user_answer = answer.lower().strip()
+        correct_answer = correct.lower().strip()
+    else:
+        user_answer = answer.strip()
+        correct_answer = correct.strip()
+
+    if user_answer == correct_answer:
         # Правильно — снимаем мут
         await bot.restrict_chat_member(
             chat_id=chat_id,
@@ -218,7 +253,8 @@ async def captcha_callback(callback: CallbackQuery, bot: Bot):
 
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"🚫 Пользователь {user_mention} дал неправильный ответ на CAPTCHA и забанен на {TIME_SECONDS_BAN} секунд."
+                text=f"🚫 Пользователь {user_mention} дал неправильный ответ на CAPTCHA "
+                     f"и забанен на {TIME_SECONDS_BAN} секунд."
             )
         except Exception as e:
             logging.error(f"Ошибка при бане за неправильную CAPTCHA: {e}")
